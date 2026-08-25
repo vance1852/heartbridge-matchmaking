@@ -95,6 +95,13 @@ func (s *Service) ProposeBatch(
 		}
 		item.Accepted = true
 		item.MatchID = detail.Match.ID
+		// One accepted pair counts as one more live introduction for each
+		// participant. Recording it in the snapshot makes the next pair weigh
+		// the matches already created by this batch, so a batch cannot seat
+		// more simultaneous introductions than the plan's concurrent cap —
+		// exactly the rule a sequence of single proposals already enforces.
+		snapshot.bump(first)
+		snapshot.bump(second)
 		result.Accepted++
 		result.Items = append(result.Items, item)
 	}

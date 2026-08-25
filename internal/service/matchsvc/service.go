@@ -107,6 +107,17 @@ func (s *Service) Propose(ctx context.Context, actor identity.Actor, input Propo
 // part in, so that a run of proposals does not repeat the same aggregate query.
 type liveCountSnapshot map[string]int
 
+// bump accounts for one more live introduction of the member so that the next
+// proposal in the same batch sees the match that just succeeded. Without it a
+// batch would weigh every pair against the count captured before the batch
+// started, bypassing the plan's concurrent-introduction cap the way a sequence
+// of single proposals never would.
+func (s liveCountSnapshot) bump(memberID string) {
+	if s != nil {
+		s[memberID]++
+	}
+}
+
 // propose creates one introduction, optionally reading the concurrent-introduction
 // counters from a snapshot taken by the caller.
 func (s *Service) propose(

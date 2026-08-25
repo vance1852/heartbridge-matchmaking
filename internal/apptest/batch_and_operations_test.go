@@ -77,6 +77,104 @@ func TestBatchProposalIsolatesFailedItems(t *testing.T) {
 	}
 }
 
+// TestBatchHonoursConcurrentIntroductionCap reproduces the regression in which a
+// matchmaker used the batch entry point to seat one member with more simultaneous
+// introductions than her plan allows. The starter plan caps live introductions at
+// two, so the third and fourth pairs of a batch that all share the same member must
+// be refused exactly the way a sequence of single proposals would refuse the third.
+func TestBatchHonoursConcurrentIntroductionCap(t *testing.T) {
+	h := newHarness(t)
+	matchmaker, _ := h.staff("capmm@heartbridge.test", "matchmaker")
+	// The starter plan grants MaxActiveMatch = 2.
+	focus := h.enrollMember(memberSpec{Email: "capA@heartbridge.test", Gender: "female"})
+	partners := []memberFixture{
+		h.enrollMember(memberSpec{Email: "capB@heartbridge.test", Gender: "male"}),
+		h.enrollMember(memberSpec{Email: "capC@heartbridge.test", Gender: "male"}),
+		h.enrollMember(memberSpec{Email: "capD@heartbridge.test", Gender: "male"}),
+		h.enrollMember(memberSpec{Email: "capE@heartbridge.test", Gender: "male"}),
+	}
+
+	inputs := make([]matchsvc.ProposeInput, 0, len(partners))
+	for _, partner := range partners {
+		inputs = append(inputs, matchsvc.ProposeInput{
+			FirstMemberID:  focus.MemberID,
+			SecondMemberID: partner.MemberID,
+		})
+	}
+	result, err := h.app.Matches.ProposeBatch(h.ctx(), matchmaker, inputs)
+	if err != nil {
+		t.Fatalf("batch proposal: %v", err)
+	}
+	if result.Accepted != 2 || result.Rejected != 2 {
+		t.Fatalf("expected two accepted and two rejected pairs, got accepted=%d rejected=%d",
+			result.Accepted, result.Rejected)
+	}
+	for index := 0; index < 2; index++ {
+		if !result.Items[index].Accepted || result.Items[index].MatchID == "" {
+			t.Fatalf("expected pair %d to be accepted: %+v", index, result.Items[index])
+		}
+	}
+	for index := 2; index < 4; index++ {
+		if result.Items[index].Accepted {
+			t.Fatalf("expected pair %d to be rejected for exceeding the cap: %+v", index, result.Items[index])
+		}
+		if result.Items[index].ErrorCode != apperr.CodePreconditionFailed {
+			t.Fatalf("expected pair %d to fail a precondition, got %s: %+v",
+				index, result.Items[index].ErrorCode, result.Items[index])
+		}
+	}
+
+	// A batch that exceeds the cap must reserve exactly the cap, leaving room to
+	// swap partners later instead of locking all four introductions at once.
+	if granted := h.allowance(focus.MemberID); granted.Reserved != 2 {
+		t.Fatalf("expected exactly two reservations for the shared member, got %d", granted.Reserved)
+	}
+	for index := 0; index < 2; index++ {
+		if granted := h.allowance(partners[index].MemberID); granted.Reserved != 1 {
+			t.Fatalf("expected one reservation for accepted partner %d, got %d", index, granted.Reserved)
+		}
+	}
+	for index := 2; index < 4; index++ {
+		if granted := h.allowance(partners[index].MemberID); granted.Reserved != 0 {
+			t.Fatalf("expected no reservation for rejected partner %d, got %d", index, granted.Reserved)
+		}
+	}
+	page, err := h.app.Matches.List(h.ctx(), matchmaker, repository.MatchFilter{})
+	if err != nil {
+		t.Fatalf("list introductions: %v", err)
+	}
+	if page.Total != 2 {
+		t.Fatalf("expected two stored introductions, got %d", page.Total)
+	}
+
+	// The same cap must also bite when the shared member is the second argument
+	// of every pair, which is the order the batch snapshot walks them in.
+	swap := h.enrollMember(memberSpec{Email: "capF@heartbridge.test", Gender: "female"})
+	swapPartners := []memberFixture{
+		h.enrollMember(memberSpec{Email: "capG@heartbridge.test", Gender: "male"}),
+		h.enrollMember(memberSpec{Email: "capH@heartbridge.test", Gender: "male"}),
+		h.enrollMember(memberSpec{Email: "capI@heartbridge.test", Gender: "male"}),
+	}
+	swapInputs := make([]matchsvc.ProposeInput, 0, len(swapPartners))
+	for _, partner := range swapPartners {
+		swapInputs = append(swapInputs, matchsvc.ProposeInput{
+			FirstMemberID:  partner.MemberID,
+			SecondMemberID: swap.MemberID,
+		})
+	}
+	swapResult, err := h.app.Matches.ProposeBatch(h.ctx(), matchmaker, swapInputs)
+	if err != nil {
+		t.Fatalf("swapped batch proposal: %v", err)
+	}
+	if swapResult.Accepted != 2 || swapResult.Rejected != 1 {
+		t.Fatalf("expected two accepted and one rejected in the swapped batch, got accepted=%d rejected=%d",
+			swapResult.Accepted, swapResult.Rejected)
+	}
+	if granted := h.allowance(swap.MemberID); granted.Reserved != 2 {
+		t.Fatalf("expected exactly two reservations for the swapped shared member, got %d", granted.Reserved)
+	}
+}
+
 // TestBatchRejectsMalformedRequests verifies the guards applied before any pair is
 // processed.
 func TestBatchRejectsMalformedRequests(t *testing.T) {
