@@ -329,6 +329,69 @@ func TestExpiryReleasesAllowanceExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestExpirySkipsAlreadyAnsweredIntroduction verifies the sweeper only reclaims
+// introductions still waiting for an answer. A pair that both accepted (and so
+// passed its consent deadline in the consented state) must keep its reserved
+// allowance: the deadline alone is not a reason to expire it.
+func TestExpirySkipsAlreadyAnsweredIntroduction(t *testing.T) {
+	h := newHarness(t)
+	matchmaker, _ := h.staff("mmAnswered@heartbridge.test", "matchmaker")
+	left := h.enrollMember(memberSpec{Email: "ansA@heartbridge.test", Gender: "female"})
+	right := h.enrollMember(memberSpec{Email: "ansB@heartbridge.test", Gender: "male"})
+	detail, err := h.app.Matches.Propose(h.ctx(), matchmaker, matchsvc.ProposeInput{
+		FirstMemberID:  left.MemberID,
+		SecondMemberID: right.MemberID,
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	for _, fixture := range []memberFixture{left, right} {
+		if _, err := h.app.Matches.Decide(h.ctx(), fixture.Actor, detail.Match.ID, matching.DecisionAccepted); err != nil {
+			t.Fatalf("accept as %s: %v", fixture.MemberID, err)
+		}
+	}
+	consented, err := h.app.Matches.Get(h.ctx(), matchmaker, detail.Match.ID)
+	if err != nil {
+		t.Fatalf("read consented introduction: %v", err)
+	}
+	if consented.Match.State != matching.StateConsented {
+		t.Fatalf("expected state %s, got %s", matching.StateConsented, consented.Match.State)
+	}
+
+	// Past the consent deadline, but the introduction was already answered.
+	h.clk.Advance(49 * time.Hour)
+	expired, err := h.app.Matches.ExpireDue(h.ctx(), h.adminActor(), 10)
+	if err != nil {
+		t.Fatalf("expire due: %v", err)
+	}
+	if expired != 0 {
+		t.Fatalf("expected the answered introduction to be left alone, got %d expired", expired)
+	}
+
+	after, err := h.app.Matches.Get(h.ctx(), matchmaker, detail.Match.ID)
+	if err != nil {
+		t.Fatalf("re-read introduction: %v", err)
+	}
+	if after.Match.State != matching.StateConsented {
+		t.Fatalf("expected the introduction to stay %s, got %s", matching.StateConsented, after.Match.State)
+	}
+	for _, memberID := range []string{left.MemberID, right.MemberID} {
+		granted := h.allowance(memberID)
+		if granted.Reserved != 1 {
+			t.Fatalf("member %s: expected the reservation to be kept, got reserved=%d", memberID, granted.Reserved)
+		}
+	}
+	releases := 0
+	for _, entry := range after.Ledger {
+		if entry.Reason == entitlement.ReasonRelease {
+			releases++
+		}
+	}
+	if releases != 0 {
+		t.Fatalf("expected no release movements for an answered introduction, got %d", releases)
+	}
+}
+
 // TestAnswerAfterDeadlineIsRejected verifies the business deadline is enforced
 // even before the sweeper ran.
 func TestAnswerAfterDeadlineIsRejected(t *testing.T) {

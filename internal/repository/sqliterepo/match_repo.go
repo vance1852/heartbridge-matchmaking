@@ -375,11 +375,16 @@ func (r *MatchRepository) ListExpiredPendingConsent(
 	if limit <= 0 {
 		limit = repository.DefaultPageSize
 	}
-	// Selecting on the deadline alone lets one index scan serve the sweeper.
+	// Only introductions still waiting for an answer are reclaimable. A match
+	// whose deadline passed but that was already answered (consented, declined,
+	// booked or closed) must keep its reserved allowance, so the state filters
+	// the deadline scan in addition to the cutoff. The composite index
+	// ix_matches_consent_deadline on (state, consent_deadline) serves this.
 	query := `SELECT ` + matchColumns + ` FROM matches
-WHERE consent_deadline <= ?
+WHERE state = ? AND consent_deadline <= ?
 ORDER BY consent_deadline LIMIT ?`
-	rows, err := r.db.Conn(ctx).QueryContext(ctx, query, sqlitedb.FormatTime(cutoff), limit)
+	rows, err := r.db.Conn(ctx).QueryContext(ctx, query,
+		string(matching.StatePendingConsent), sqlitedb.FormatTime(cutoff), limit)
 	if err != nil {
 		return nil, sqlitedb.TranslateError("list expired matches", err)
 	}
