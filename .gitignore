@@ -1,0 +1,27 @@
+# Local runtime state.
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local secrets and environment overrides.
+.env
+.env.*
+!.env.example
+
+# Build output.
+bin/
+dist/
+heartbridge-server
+heartbridge-server.exe
+
+# Go tooling artefacts.
+coverage.out
+*.test
+.gocache/
+
+# Editor and OS noise.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
