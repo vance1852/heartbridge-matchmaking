@@ -389,13 +389,15 @@ func (s *Service) Cancel(ctx context.Context, actor identity.Actor, matchID, rea
 		if err := s.matches.UpdateState(ctx, matchID, current.Version, matching.StateCancelled, note, now); err != nil {
 			return err
 		}
-		if current.State.SeatBoundQuota() {
-			// Returning the venue seat also settles the introduction this match
-			// was holding.
+		// A scheduled introduction holds two distinct scarce resources: the
+		// venue seat and the reserved introduction of each member. Returning
+		// the seat never settles the allowance, so both must be released.
+		if current.State.OccupiesSlot() {
 			if err := s.releaseSlot(ctx, matchID, now); err != nil {
 				return err
 			}
-		} else if err := s.releaseReservations(ctx, current, now); err != nil {
+		}
+		if err := s.releaseReservations(ctx, current, now); err != nil {
 			return err
 		}
 		for _, participant := range current.Participants() {

@@ -547,3 +547,97 @@ func TestIllegalTransitionsAreRefused(t *testing.T) {
 		t.Fatal("expected the error to match the illegal transition sentinel by code")
 	}
 }
+
+// TestCancelScheduledIntroductionReturnsSeatAndAllowance is the regression for a
+// scheduled introduction that was withdrawn: the venue seat was freed but the
+// reserved introduction of each member stayed held, leaving neither a refund in
+// the ledger nor room for a new introduction. Cancelling a scheduled
+// introduction must release both scarce resources together.
+func TestCancelScheduledIntroductionReturnsSeatAndAllowance(t *testing.T) {
+	h := newHarness(t)
+	matchmaker, _ := h.staff("mm13@heartbridge.test", "matchmaker")
+	left := h.enrollMember(memberSpec{Email: "schedA@heartbridge.test", Gender: "female"})
+	right := h.enrollMember(memberSpec{Email: "schedB@heartbridge.test", Gender: "male"})
+	slotID := h.publishSlot("TH-4", 24*time.Hour, 2*time.Hour, 1)
+
+	detail, err := h.app.Matches.Propose(h.ctx(), matchmaker, matchsvc.ProposeInput{
+		FirstMemberID:  left.MemberID,
+		SecondMemberID: right.MemberID,
+	})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	for _, fixture := range []memberFixture{left, right} {
+		if _, err := h.app.Matches.Decide(h.ctx(), fixture.Actor, detail.Match.ID, matching.DecisionAccepted); err != nil {
+			t.Fatalf("accept as %s: %v", fixture.MemberID, err)
+		}
+	}
+	booked, err := h.app.Schedule.Book(h.ctx(), matchmaker, detail.Match.ID, slotID)
+	if err != nil {
+		t.Fatalf("book meetup: %v", err)
+	}
+	if booked.Match.State != matching.StateScheduled {
+		t.Fatalf("expected state %s, got %s", matching.StateScheduled, booked.Match.State)
+	}
+	for _, memberID := range []string{left.MemberID, right.MemberID} {
+		if granted := h.allowance(memberID); granted.Reserved != 1 {
+			t.Fatalf("member %s: expected reserved=1 while scheduled, got %d", memberID, granted.Reserved)
+		}
+	}
+
+	// A second introduction for the same pair is blocked while the first is live.
+	if _, err := h.app.Matches.Propose(h.ctx(), matchmaker, matchsvc.ProposeInput{
+		FirstMemberID:  left.MemberID,
+		SecondMemberID: right.MemberID,
+	}); err == nil {
+		t.Fatal("expected the live pair to block a second proposal")
+	}
+
+	cancelled, err := h.app.Matches.Cancel(h.ctx(), matchmaker, detail.Match.ID, "venue incident")
+	if err != nil {
+		t.Fatalf("cancel scheduled introduction: %v", err)
+	}
+	if cancelled.Match.State != matching.StateCancelled {
+		t.Fatalf("expected state %s, got %s", matching.StateCancelled, cancelled.Match.State)
+	}
+
+	// The venue seat is returned.
+	slot, err := h.app.Repositories.Slots.GetByID(h.ctx(), slotID)
+	if err != nil {
+		t.Fatalf("read slot: %v", err)
+	}
+	if slot.BookedCount != 0 {
+		t.Fatalf("expected the slot to release its booking, got booked=%d", slot.BookedCount)
+	}
+
+	// Both members recover their reserved introduction and a ledger release is
+	// recorded for each.
+	for _, memberID := range []string{left.MemberID, right.MemberID} {
+		granted := h.allowance(memberID)
+		if granted.Reserved != 0 || granted.Used != 0 {
+			t.Fatalf("member %s: expected reserved=0 used=0 after cancel, got reserved=%d used=%d",
+				memberID, granted.Reserved, granted.Used)
+		}
+	}
+	reserved, used := entitlement.Balance(cancelled.Ledger)
+	if reserved != 0 || used != 0 {
+		t.Fatalf("expected a balanced ledger after cancel, got reserved=%d used=%d", reserved, used)
+	}
+	var releases int
+	for _, entry := range cancelled.Ledger {
+		if entry.Reason == entitlement.ReasonRelease {
+			releases++
+		}
+	}
+	if releases != 2 {
+		t.Fatalf("expected two release movements, got %d", releases)
+	}
+
+	// The freed allowance now allows a new introduction for the same pair.
+	if _, err := h.app.Matches.Propose(h.ctx(), matchmaker, matchsvc.ProposeInput{
+		FirstMemberID:  left.MemberID,
+		SecondMemberID: right.MemberID,
+	}); err != nil {
+		t.Fatalf("expected a new proposal to succeed after the scheduled introduction was cancelled: %v", err)
+	}
+}

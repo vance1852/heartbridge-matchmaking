@@ -69,12 +69,6 @@ func (s State) OccupiesSlot() bool {
 	return s == StateScheduled
 }
 
-// SeatBoundQuota reports whether the introduction a match holds is accounted for
-// through its venue seat, so that returning the seat also settles the hold.
-func (s State) SeatBoundQuota() bool {
-	return s == StateScheduled
-}
-
 // ActiveStates lists the states considered live for uniqueness and quota rules.
 func ActiveStates() []State {
 	return []State{StatePendingConsent, StateConsented, StateScheduled, StateMet}
