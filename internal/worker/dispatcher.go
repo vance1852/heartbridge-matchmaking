@@ -104,6 +104,21 @@ func (d *Dispatcher) deliver(ctx context.Context, job notify.Job) error {
 	sendErr := d.sender.Send(ctx, job)
 	now := d.clock.Now()
 
+	// A cancelled context is not a delivery failure: the attempt never really
+	// happened, so the row stays untouched and is picked up again later. This
+	// also covers the stop boundary that the loop cancellation represents: when
+	// the dispatcher is shutting down mid-round, no conclusion may be written,
+	// otherwise a half-finished attempt hardens into a terminal state and the
+	// row is never re-sent. The bookkeeping write below uses a detached context
+	// on purpose so that recording a finished attempt survives the loop's exit,
+	// which is why the cancellation must be checked before that write runs.
+	if errors.Is(sendErr, context.Canceled) || errors.Is(sendErr, context.DeadlineExceeded) {
+		return sendErr
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	record := detachedContext(ctx)
 	if sendErr == nil {
 		if err := d.repo.MarkSucceeded(record, job.ID, attempts, now); err != nil {
@@ -113,11 +128,6 @@ func (d *Dispatcher) deliver(ctx context.Context, job notify.Job) error {
 		d.stats.Delivered++
 		d.mu.Unlock()
 		return nil
-	}
-	// A cancelled context is not a delivery failure: the attempt never really
-	// happened, so the row stays untouched and is picked up again later.
-	if errors.Is(sendErr, context.Canceled) || errors.Is(sendErr, context.DeadlineExceeded) {
-		return sendErr
 	}
 
 	if attempts >= job.MaxAttempts {
