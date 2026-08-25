@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/vance1852/heartbridge-matchmaking/internal/apperr"
@@ -33,22 +32,21 @@ func NewGuard(repo repository.IdempotencyRepository, source clock.Clock, ttl tim
 }
 
 // Request identifies one mutating call.
+//
+// The replay bucket is scoped by the actor, the HTTP method and the request
+// path. Scoping by the path is essential: a booking of one introduction lives
+// at /matches/{matchID}/meetup, so two different introductions fall into two
+// separate buckets and each one is booked for real, while a retry of the same
+// introduction reuses the same path and replays the stored outcome. Collapsing
+// every mutating endpoint into one shared bucket would let the outcome of one
+// endpoint be replayed for another, which is how a booking for a different pair
+// silently returned the first pair's meetup.
 type Request struct {
 	ActorID string
 	Method  string
 	Path    string
-	Surface string
 	Key     string
 	Body    []byte
-}
-
-// surface returns the bucket a replay record is stored under. Grouping the
-// mutating endpoints into one surface keeps the registry compact.
-func (r Request) surface() string {
-	if strings.TrimSpace(r.Surface) == "" {
-		return "mutation"
-	}
-	return r.Surface
 }
 
 // Fingerprint returns the hash of the request body. Two calls sharing a key must
@@ -72,8 +70,7 @@ func (g *Guard) Lookup(ctx context.Context, request Request) (Replay, bool, erro
 	if request.Key == "" {
 		return Replay{}, false, nil
 	}
-	surface := request.surface()
-	record, err := g.repo.Get(ctx, request.ActorID, surface, surface, request.Key)
+	record, err := g.repo.Get(ctx, request.ActorID, request.Method, request.Path, request.Key)
 	if err != nil {
 		if errors.Is(err, apperr.ErrNotFound) {
 			return Replay{}, false, nil
@@ -102,11 +99,10 @@ func (g *Guard) Remember(ctx context.Context, request Request, status int, body 
 		return nil
 	}
 	now := g.clock.Now()
-	surface := request.surface()
 	record := repository.IdempotencyRecord{
 		ActorID:     request.ActorID,
-		Method:      surface,
-		Path:        surface,
+		Method:      request.Method,
+		Path:        request.Path,
 		Key:         request.Key,
 		RequestHash: request.Fingerprint(),
 		Status:      status,

@@ -169,7 +169,6 @@ func (s *Server) idempotent(
 		ActorID: current.UserID,
 		Method:  request.Method,
 		Path:    request.URL.Path,
-		Surface: "mutation",
 		Key:     key,
 		Body:    body,
 	}

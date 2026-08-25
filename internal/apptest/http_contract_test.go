@@ -261,6 +261,83 @@ func TestIdempotentProposalReplaysStoredOutcome(t *testing.T) {
 	}
 }
 
+// TestIdempotentBookingServesEachMatchSeparately reproduces the matchmaker
+// scenario: the same retry key and the same tea-house slot are used to book two
+// different accepted introductions. Each match must receive its own meetup and
+// occupy its own seat, while retrying the same match still replays one booking.
+func TestIdempotentBookingServesEachMatchSeparately(t *testing.T) {
+	h := newHarness(t)
+	matchmaker, matchmakerToken := h.staff("bookidem@heartbridge.test", "matchmaker")
+	slotID := h.publishSlot("TEA-WED", 30*time.Hour, 2*time.Hour, 2)
+
+	firstMatch := h.consentedMatch("bmm1@heartbridge.test", "b1a@heartbridge.test", "b1b@heartbridge.test")
+	secondMatch := h.consentedMatch("bmm2@heartbridge.test", "b2a@heartbridge.test", "b2b@heartbridge.test")
+
+	book := func(matchID string) apiResponse {
+		return h.do(http.MethodPost, "/api/v1/matches/"+matchID+"/meetup", matchmakerToken,
+			map[string]any{"slot_id": slotID}, map[string]string{"Idempotency-Key": "book-wednesday-tea"})
+	}
+
+	first := book(firstMatch)
+	if first.Status != http.StatusCreated {
+		t.Fatalf("expected the first booking to return 201, got %d (%s)", first.Status, first.Raw)
+	}
+	firstMeetup := first.str("id")
+	firstMatchID := first.str("match_id")
+	if firstMeetup == "" || firstMatchID != firstMatch {
+		t.Fatalf("expected a meetup for match %s, got id=%q match_id=%q (%s)",
+			firstMatch, firstMeetup, firstMatchID, first.Raw)
+	}
+
+	// Same key, same slot, different match: must NOT replay the first booking.
+	second := book(secondMatch)
+	if second.Status != http.StatusCreated {
+		t.Fatalf("expected the second booking to return 201, got %d (%s)", second.Status, second.Raw)
+	}
+	if second.Headers.Get("Idempotent-Replay") == "true" {
+		t.Fatal("the second match must be booked for real, not replayed")
+	}
+	secondMeetup := second.str("id")
+	if secondMeetup == "" || secondMeetup == firstMeetup {
+		t.Fatalf("expected a distinct meetup id for the second match, got %q", secondMeetup)
+	}
+	if second.str("match_id") != secondMatch {
+		t.Fatalf("expected the meetup to belong to match %s, got match_id=%q",
+			secondMatch, second.str("match_id"))
+	}
+
+	// Both seats are taken: the slot capacity is two and both landed.
+	slot, err := h.app.Repositories.Slots.GetByID(h.ctx(), slotID)
+	if err != nil {
+		t.Fatalf("read slot: %v", err)
+	}
+	if slot.BookedCount != 2 {
+		t.Fatalf("expected the slot to hold two bookings, got %d", slot.BookedCount)
+	}
+
+	// Retrying the first match with the same key and body replays the one booking,
+	// so the slot is not overbooked and the same meetup is returned.
+	replay := book(firstMatch)
+	if replay.Status != http.StatusCreated {
+		t.Fatalf("expected the replay to return 201, got %d (%s)", replay.Status, replay.Raw)
+	}
+	if replay.Headers.Get("Idempotent-Replay") != "true" {
+		t.Fatal("expected the retry of the same match to be replayed")
+	}
+	if replay.str("id") != firstMeetup {
+		t.Fatalf("expected the replay to return the same meetup id %q, got %q",
+			firstMeetup, replay.str("id"))
+	}
+	slot, err = h.app.Repositories.Slots.GetByID(h.ctx(), slotID)
+	if err != nil {
+		t.Fatalf("read slot after replay: %v", err)
+	}
+	if slot.BookedCount != 2 {
+		t.Fatalf("expected the slot to still hold two bookings after replay, got %d", slot.BookedCount)
+	}
+	_ = matchmaker // staff fixture keeps the matchmaker principal stable
+}
+
 // TestCorrelationIDIsPropagated verifies that a client supplied correlation id is
 // echoed and reaches the error envelope and the audit trail.
 func TestCorrelationIDIsPropagated(t *testing.T) {
