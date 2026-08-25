@@ -1,0 +1,8 @@
+# Keep the repository normalised on LF so that gofmt and the Docker build behave
+# identically on every developer platform.
+* text=auto eol=lf
+*.go text eol=lf
+*.sql text eol=lf
+*.md text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
